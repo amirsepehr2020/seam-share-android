@@ -9,7 +9,6 @@ android { namespace = "ir.redlighte.seamshare"; compileSdk = 35
 }
 
 kotlin { jvmToolchain(17) }
-
 android.buildFeatures { compose = true }
 
 dependencies {
@@ -19,5 +18,6 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
