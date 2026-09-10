@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
 import androidx.documentfile.provider.DocumentFile
+import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream
@@ -55,7 +56,7 @@ class SeamReceiverServer(private val context:Context, private val identity:SeamI
         val lines=headerBytes.toString(Charsets.UTF_8.name()).trim().split("\r\n");val request=lines.firstOrNull().orEmpty();val headers=lines.drop(1).mapNotNull{it.split(":",limit=2).takeIf{p->p.size==2}?.let{p->p[0].trim().lowercase() to p[1].trim()}}.toMap()
         if(request.startsWith("POST /pair")){respond(s,200,"{}");return@runCatching};if(headers["x-seam-token"]!=identity.token){respond(s,401,"");return@runCatching}
         if(request.startsWith("POST /request")){
-            val body=readBody(input,headers["content-length"]?.toLongOrNull()?:0L);val o=org.json.JSONObject(body)
+            val body=readBody(input,headers["content-length"]?.toLongOrNull()?:0L);val o=JSONObject(body)
             val req=IncomingRequest(o.getString("id"),o.getString("name"),o.getLong("size"),o.getString("relativePath"),o.getString("checksum_sha256"),o.optInt("e2e_version",0).takeIf{it>0},o.optString("sender_ephemeral_public_key","").takeIf{it.isNotBlank()},o.optString("nonce_prefix","").takeIf{it.isNotBlank()})
             require(req.checksumSha256.matches(Regex("[0-9a-fA-F]{64}")))
             var e2eResponse="{}"
@@ -74,10 +75,10 @@ class SeamReceiverServer(private val context:Context, private val identity:SeamI
                 val crypto=pendingE2e.remove(transferId) ?: run{deleteOutput(output.second);respond(s,403,"missing e2e session");return@runCatching}
                 val plainSize=headers["x-plaintext-size"]?.toLongOrNull() ?: -1L;require(plainSize>=0);require(SeamE2eProtocol.ciphertextSize(plainSize)==length)
                 var plainRemaining=plainSize;var index=0L
-                while(plainRemaining>0||index==0L){val plainLen=if(plainRemaining==0L)0 else minOf(256L*1024L,plainRemaining).toInt();val frameLen=plainLen+16;val cipher=readBytes(input,frameLen);val plain=SeamE2eCrypto.decrypt(crypto.key,SeamE2eProtocol.nonce(crypto.noncePrefix,index),cipher,SeamE2eProtocol.aad(transferId,index,plainLen));require(plain.size==plainLen);out.write(plain);digest.update(plain);received+=plain.size;plainRemaining-=plainLen;index++}
+                while(plainRemaining>0||index==0L){val plainLen=if(plainRemaining==0L)0 else minOf(256L*1024L,plainRemaining).toInt();val frameLen=plainLen+16;val cipher=readBytes(input,frameLen);val plain=SeamE2eCrypto.decrypt(crypto.key,SeamE2eProtocol.nonce(crypto.noncePrefix,index),cipher,SeamE2eProtocol.aad(transferId,index,plainLen));require(plain.size==plainLen);out.write(plain);digest.update(plain);received+=plain.size.toLong();plainRemaining-=plainLen;index++}
                 require(received==plainSize)
             }else{
-                var remaining=length;val buffer=ByteArray(256*1024);while(remaining>0){val n=input.read(buffer,0,minOf(buffer.size.toLong(),remaining).toInt());if(n<=0)break;out.write(buffer,0,n);digest.update(buffer,0,n);received+=n;remaining-=n};if(received!=length){deleteOutput(output.second);respond(s,422,"size mismatch");return@runCatching}
+                var remaining=length;val buffer=ByteArray(256*1024);while(remaining>0){val n=input.read(buffer,0,minOf(buffer.size.toLong(),remaining).toInt());if(n<=0)break;out.write(buffer,0,n);digest.update(buffer,0,n);received+=n.toLong();remaining-=n};if(received!=length){deleteOutput(output.second);respond(s,422,"size mismatch");return@runCatching}
             }
         }
         val actual=digest.digest().joinToString(""){String.format("%02x",it)}
