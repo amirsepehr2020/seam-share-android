@@ -59,12 +59,8 @@ class SeamReceiverServer(private val context:Context, private val identity:SeamI
             val req=IncomingRequest(o.getString("id"),o.getString("name"),o.getLong("size"),o.getString("relativePath"),o.getString("checksum_sha256"),o.optInt("e2e_version",0).takeIf{it>0},o.optString("sender_ephemeral_public_key","").takeIf{it.isNotBlank()},o.optString("nonce_prefix","").takeIf{it.isNotBlank()})
             require(req.checksumSha256.matches(Regex("[0-9a-fA-F]{64}")))
             var e2eResponse="{}"
-            if(req.e2eVersion==1&&req.senderEphemeralPublicKey!=null&&req.noncePrefix!=null){
-                val peer=hexDecode(req.senderEphemeralPublicKey,32);val prefix=hexDecode(req.noncePrefix,4);val kp=SeamE2eCrypto.generateKeyPair();val key=SeamE2eCrypto.sharedKey(kp.privateKey,peer);pendingE2e[req.id]=PendingE2e(key,prefix);e2eResponse=JSONObject().apply{put("e2e_version",1);put("receiver_ephemeral_public_key",hexEncode(kp.publicKey))}.toString()
-            }
-            val future=CompletableFuture<Boolean>();pending[req.id]=future;onIncomingRequest?.invoke(req);val ok=runCatching{future.get(120,java.util.concurrent.TimeUnit.SECONDS)}.getOrDefault(false);pending.remove(req.id)
-            if(!ok)pendingE2e.remove(req.id)
-            respond(s,if(ok)200 else 403,if(ok)e2eResponse else "DECLINED");return@runCatching
+            if(req.e2eVersion==1&&req.senderEphemeralPublicKey!=null&&req.noncePrefix!=null){val peer=hexDecode(req.senderEphemeralPublicKey,32);val prefix=hexDecode(req.noncePrefix,4);val kp=SeamE2eCrypto.generateKeyPair();val key=SeamE2eCrypto.sharedKey(kp.privateKey,peer);pendingE2e[req.id]=PendingE2e(key,prefix);e2eResponse=JSONObject().apply{put("e2e_version",1);put("receiver_ephemeral_public_key",hexEncode(kp.publicKey))}.toString()}
+            val future=CompletableFuture<Boolean>();pending[req.id]=future;onIncomingRequest?.invoke(req);val ok=runCatching{future.get(120,java.util.concurrent.TimeUnit.SECONDS)}.getOrDefault(false);pending.remove(req.id);if(!ok)pendingE2e.remove(req.id);respond(s,if(ok)200 else 403,if(ok)e2eResponse else "DECLINED");return@runCatching
         }
         if(request.startsWith("POST /text")){val length=headers["content-length"]?.toLongOrNull()?:0L;val text=readBody(input,length);val kind=headers["x-seam-text-kind"] ?: "text";val id=headers["x-seam-text-id"] ?: "android-text-${System.nanoTime()}";onIncomingText?.invoke(IncomingText(id,text,kind));respond(s,201,"OK");return@runCatching}
         if(!request.startsWith("POST /receive")){respond(s,404,"");return@runCatching}
@@ -74,22 +70,22 @@ class SeamReceiverServer(private val context:Context, private val identity:SeamI
         val output=createOutput(rawName,rel) ?: run{respond(s,500,"unable to create output");return@runCatching};val digest=MessageDigest.getInstance("SHA-256");var received=0L
         output.first.use{out->
             if(encrypted){
-                val crypto=pendingE2e.remove(headers["x-seam-transfer-id"] ?: "") ?: run{deleteOutput(output.second);respond(s,403,"missing e2e session");return@runCatching}
-                var plainRemaining=headers["x-plaintext-size"]?.toLongOrNull() ?: -1L;require(plainRemaining>=0)
-                var index=0L
-                while(plainRemaining>0||index==0L){val plainLen=if(plainRemaining==0L)0 else minOf(256L*1024L,plainRemaining).toInt();val frameLen=plainLen+16;val cipher=readBytes(input,frameLen);val nonce=SeamE2eProtocol.nonce(crypto.noncePrefix,index);val aad=SeamE2eProtocol.aad(headers["x-seam-transfer-id"] ?: "",index,plainLen);val plain=SeamE2eCrypto.decrypt(crypto.key,nonce,cipher,aad);require(plain.size==plainLen);out.write(plain);digest.update(plain);received+=plain.size;plainRemaining-=plainLen;index++}
+                val transferId=headers["x-seam-transfer-id"] ?: run{deleteOutput(output.second);respond(s,400,"missing transfer id");return@runCatching}
+                val crypto=pendingE2e.remove(transferId) ?: run{deleteOutput(output.second);respond(s,403,"missing e2e session");return@runCatching}
+                val plainSize=headers["x-plaintext-size"]?.toLongOrNull() ?: -1L;require(plainSize>=0);require(SeamE2eProtocol.ciphertextSize(plainSize)==length)
+                var plainRemaining=plainSize;var index=0L
+                while(plainRemaining>0||index==0L){val plainLen=if(plainRemaining==0L)0 else minOf(256L*1024L,plainRemaining).toInt();val frameLen=plainLen+16;val cipher=readBytes(input,frameLen);val plain=SeamE2eCrypto.decrypt(crypto.key,SeamE2eProtocol.nonce(crypto.noncePrefix,index),cipher,SeamE2eProtocol.aad(transferId,index,plainLen));require(plain.size==plainLen);out.write(plain);digest.update(plain);received+=plain.size;plainRemaining-=plainLen;index++}
+                require(received==plainSize)
             }else{
-                var remaining=length;val buffer=ByteArray(256*1024);while(remaining>0){val n=input.read(buffer,0,minOf(buffer.size.toLong(),remaining).toInt());if(n<=0)break;out.write(buffer,0,n);digest.update(buffer,0,n);received+=n;remaining-=n}
-                if(received!=length){deleteOutput(output.second);respond(s,422,"size mismatch");return@runCatching}
+                var remaining=length;val buffer=ByteArray(256*1024);while(remaining>0){val n=input.read(buffer,0,minOf(buffer.size.toLong(),remaining).toInt());if(n<=0)break;out.write(buffer,0,n);digest.update(buffer,0,n);received+=n;remaining-=n};if(received!=length){deleteOutput(output.second);respond(s,422,"size mismatch");return@runCatching}
             }
         }
-        if(received!=headers["x-plaintext-size"]?.toLongOrNull().takeIf{encrypted} ?: length){deleteOutput(output.second);respond(s,422,"size mismatch");return@runCatching}
         val actual=digest.digest().joinToString(""){String.format("%02x",it)}
         if(actual!=expected){deleteOutput(output.second);onTransferVerificationFailed?.invoke(rawName,expected,actual);respond(s,422,"checksum mismatch");return@runCatching}
         onTransferVerified?.invoke(rawName,actual);respond(s,201,"VERIFIED")
     }}}
     private fun readBody(input:BufferedInputStream,length:Long):String=String(readBytes(input,length),Charsets.UTF_8)
-    private fun readBytes(input:BufferedInputStream,length:Long):ByteArray{require(length>=0&&length<=Long.MAX_VALUE);val out=ByteArrayOutputStream(length.coerceAtMost(Int.MAX_VALUE.toLong()).toInt());var remaining=length;val b=ByteArray(8192);while(remaining>0){val n=input.read(b,0,minOf(b.size.toLong(),remaining).toInt());if(n<=0)throw IllegalStateException("connection closed");out.write(b,0,n);remaining-=n};return out.toByteArray()}
+    private fun readBytes(input:BufferedInputStream,length:Long):ByteArray{require(length>=0&&length<=Int.MAX_VALUE);val out=ByteArrayOutputStream(length.toInt());var remaining=length;val b=ByteArray(8192);while(remaining>0){val n=input.read(b,0,minOf(b.size.toLong(),remaining).toInt());if(n<=0)throw IllegalStateException("connection closed");out.write(b,0,n);remaining-=n};return out.toByteArray()}
     private fun respond(socket:Socket,code:Int,body:String){val reason=when(code){200->"OK";201->"Created";400->"Bad Request";401->"Unauthorized";403->"Forbidden";422->"Unprocessable Entity";else->"Error"};val bytes=body.toByteArray();BufferedOutputStream(socket.getOutputStream()).use{it.write("HTTP/1.1 $code $reason\r\nContent-Length: ${bytes.size}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n".toByteArray());it.write(bytes);it.flush()}}
     private fun discover(){while(running){try{DatagramSocket(38947).use{socket->socket.broadcast=true;val buffer=ByteArray(1024);while(running){val packet=DatagramPacket(buffer,buffer.size);socket.receive(packet);val text=String(packet.data,0,packet.length);val p=text.split('|');if(p.size>=3&&p[0]=="SEAM_SHARE_DISCOVER_V2"){val reply="SEAM_SHARE_DISCOVER_V2|${identity.deviceName}|$port".toByteArray();socket.send(DatagramPacket(reply,reply.size,packet.address,packet.port))}}}}catch(_:Exception){if(running)try{Thread.sleep(1000)}catch(_:InterruptedException){Thread.currentThread().interrupt()}}}}
     private fun hexDecode(value:String,size:Int):ByteArray{require(value.length==size*2);return ByteArray(size){value.substring(it*2,it*2+2).toInt(16).toByte()}}
