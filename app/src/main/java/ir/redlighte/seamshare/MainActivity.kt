@@ -1,6 +1,7 @@
 package ir.redlighte.seamshare
 
 import android.content.Context
+import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -17,123 +18,36 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.documentfile.provider.DocumentFile
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
-import ir.redlighte.seamshare.network.SeamDiscovery
-import ir.redlighte.seamshare.network.SeamIdentityStore
-import ir.redlighte.seamshare.network.SeamPairing
-import ir.redlighte.seamshare.network.SeamPairingStore
-import ir.redlighte.seamshare.network.SeamReceiverServer
-import ir.redlighte.seamshare.network.SeamTransferController
+import ir.redlighte.seamshare.network.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
-class MainActivity : ComponentActivity() {
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        setContent { SeamShareApp() }
-    }
-}
+class MainActivity : ComponentActivity(){override fun onCreate(savedInstanceState:Bundle?){super.onCreate(savedInstanceState);setContent{SeamShareApp()}}}
+private fun localIp(context:Context):String=runCatching{val wm=context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager;val ip=wm.connectionInfo.ipAddress;listOf(ip and 255,(ip shr 8) and 255,(ip shr 16) and 255,(ip shr 24) and 255).joinToString(".")}.getOrDefault("127.0.0.1")
+data class QueueItem(val uri:Uri,val name:String,val size:Long,val relativePath:String)
+private fun collectTree(context:Context,root:DocumentFile,current:String=""):List<QueueItem>{val out=mutableListOf<QueueItem>();root.listFiles().forEach{f->val rel=if(current.isBlank())f.name.orEmpty() else "$current/${f.name.orEmpty()}";if(f.isDirectory)out+=collectTree(context,f,rel) else out+=QueueItem(f.uri,f.name? :"shared-file",f.length(),rel)};return out}
 
-private fun localIp(context: Context): String = runCatching {
-    val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-    val ip = wm.connectionInfo.ipAddress
-    listOf(ip and 255, (ip shr 8) and 255, (ip shr 16) and 255, (ip shr 24) and 255).joinToString(".")
-}.getOrDefault("127.0.0.1")
-
-@Composable
-private fun SeamShareApp() {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val scope = rememberCoroutineScope()
-    val identity = remember { SeamIdentityStore(context).load() }
-    val store = remember { SeamPairingStore(context) }
-    val receiver = remember { SeamReceiverServer(context, identity) }
-    var pairing by remember { mutableStateOf<SeamPairing?>(null) }
-    var devices by remember { mutableStateOf<List<SeamDiscovery.Device>>(emptyList()) }
-    var scanning by remember { mutableStateOf(false) }
-    var progress by remember { mutableStateOf(0) }
-    var sending by remember { mutableStateOf(false) }
-    var message by remember { mutableStateOf("") }
-    val discovery = remember { SeamDiscovery() }
-
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        val target = pairing ?: return@rememberLauncherForActivityResult
-        if (uri == null) return@rememberLauncherForActivityResult
-        sending = true
-        progress = 0
-        message = "Sending…"
-        scope.launch(Dispatchers.IO) {
-            val result = SeamTransferController(context).send(uri, target.ip, target.port, target.token) { p -> progress = p.percent }
-            launch(Dispatchers.Main) {
-                sending = false
-                message = result.fold({ "Sent successfully" }, { "Transfer failed: ${it.message}" })
-            }
-        }
-    }
-
-    val qrLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
-        if (result.contents.isNullOrBlank()) {
-            message = "QR scan cancelled"
-        } else {
-            runCatching { SeamPairing.fromJson(result.contents) }.onSuccess { value ->
-                scope.launch(Dispatchers.IO) {
-                    val ip = localIp(context)
-                    val pairResult = ir.redlighte.seamshare.network.SeamPairClient.pair(value, identity, ip, 38949)
-                    launch(Dispatchers.Main) {
-                        if (pairResult.isSuccess) {
-                            store.save(value)
-                            pairing = value
-                            message = "Paired with ${value.deviceName}"
-                        } else {
-                            message = "Pairing failed: ${pairResult.exceptionOrNull()?.message ?: "connection error"}"
-                        }
-                    }
-                }
-            }.onFailure { message = "Invalid SEAM Share pairing code" }
-        }
-    }
-
-    DisposableEffect(Unit) {
-        receiver.start()
-        onDispose { receiver.stop() }
-    }
-    LaunchedEffect(Unit) { pairing = store.load() }
-
-    MaterialTheme(colorScheme = darkColorScheme(primary = Color(0xFF7C5CFF), secondary = Color(0xFF00D9FF))) {
-        Box(Modifier.fillMaxSize().background(Color(0xFF080A10))) {
-            Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                Text("SEAM Share", color = Color.White, fontSize = 22.sp)
-                Text("Move freely. Stay connected.", color = Color(0xFF7E8393), fontSize = 12.sp)
-                Card(shape = RoundedCornerShape(28.dp), colors = CardDefaults.cardColors(containerColor = Color(0xFF11141E))) {
-                    Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(if (pairing == null) "Connect your PC" else pairing!!.deviceName, color = Color.White, fontSize = 24.sp)
-                        Text(if (pairing == null) "Scan the QR code shown by SEAM Share on Windows." else "Paired over your local network.", color = Color(0xFF858A9B), fontSize = 13.sp, modifier = Modifier.padding(top = 8.dp))
-                        Button(onClick = { qrLauncher.launch(ScanOptions().apply { setDesiredBarcodeFormats(ScanOptions.QR_CODE); setPrompt("Scan the SEAM Share QR code on your PC"); setBeepEnabled(false); setOrientationLocked(false) }) }, modifier = Modifier.padding(top = 18.dp)) { Text("Scan pairing QR") }
-                    }
-                }
-                if (pairing != null) Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF151824)), modifier = Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(18.dp)) {
-                        Text("CONNECTED", color = Color(0xFF7CE9FF), fontSize = 10.sp)
-                        Text("${pairing!!.ip}:${pairing!!.port}", color = Color.White, fontSize = 15.sp)
-                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            Button(enabled = !sending, onClick = { picker.launch(arrayOf("*/*")) }) { Text(if (sending) "Sending… $progress%" else "Choose & send file") }
-                            TextButton(enabled = !sending, onClick = { store.clear(); pairing = null; message = "Pairing removed" }) { Text("Forget") }
-                        }
-                        if (sending) LinearProgressIndicator(progress = { progress / 100f }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp))
-                    }
-                }
-                Card(shape = RoundedCornerShape(28.dp), colors = CardDefaults.cardColors(containerColor = Color(0xFF11141E))) {
-                    Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("Find nearby devices", color = Color.White, fontSize = 20.sp)
-                        Text("Use the same Wi‑Fi network for fast local transfers.", color = Color(0xFF858A9B), fontSize = 13.sp, modifier = Modifier.padding(top = 8.dp))
-                        Button(onClick = { scanning = true; discovery.scan { devices = it; scanning = false } }, modifier = Modifier.padding(top = 18.dp)) { Text(if (scanning) "Scanning…" else "Scan nearby devices") }
-                    }
-                }
-                Text("NEARBY", color = Color(0xFF666C7D), fontSize = 10.sp)
-                if (devices.isEmpty()) Text("No devices found yet", color = Color(0xFF858A9B), fontSize = 13.sp)
-                devices.forEach { device -> Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF151824)), modifier = Modifier.fillMaxWidth()) { Column(Modifier.padding(16.dp)) { Text(device.name, color = Color.White); Text("${device.ip}:${device.port}", color = Color(0xFF7CE9FF), fontSize = 12.sp) } } }
-                if (message.isNotBlank()) Text(message, color = Color(0xFFB8B9C8), fontSize = 12.sp)
-            }
-        }
-    }
+@Composable private fun SeamShareApp(){
+ val context=androidx.compose.ui.platform.LocalContext.current;val scope=rememberCoroutineScope();val identity=remember{SeamIdentityStore(context).load()};val store=remember{SeamPairingStore(context)};val receiver=remember{SeamReceiverServer(context,identity)}
+ var pairing by remember{mutableStateOf<SeamPairing?>(null)};var devices by remember{mutableStateOf<List<SeamDiscovery.Device>>(emptyList())};var scanning by remember{mutableStateOf(false)};var progress by remember{mutableStateOf(0)};var sending by remember{mutableStateOf(false)};var message by remember{mutableStateOf("")};var queue by remember{mutableStateOf<List<QueueItem>>(emptyList())};var incoming by remember{mutableStateOf<IncomingRequest?>(null)};val discovery=remember{SeamDiscovery()}
+ val picker=rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()){uris->if(uris.isNotEmpty()){val items=uris.map{uri->val name=context.contentResolver.query(uri,arrayOf("_display_name"),null,null,null)?.use{c->if(c.moveToFirst())c.getString(0) else "shared-file"}?:"shared-file";val size=context.contentResolver.openAssetFileDescriptor(uri,"r")?.use{it.length}?:0L;QueueItem(uri,name,size,name)};queue=queue+items;message="${items.size} file(s) added to queue"}}
+ val folderPicker=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()){uri->if(uri!=null){runCatching{context.contentResolver.takePersistableUriPermission(uri,android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);val root=DocumentFile.fromTreeUri(context,uri);requireNotNull(root);collectTree(context,root)}.onSuccess{items->queue=queue+items;message="${items.size} file(s) from folder added"}.onFailure{message="Could not read folder"}}}
+ val qrLauncher=rememberLauncherForActivityResult(ScanContract()){result->if(result.contents.isNullOrBlank()){message="QR scan cancelled"}else{runCatching{SeamPairing.fromJson(result.contents)}.onSuccess{value->scope.launch(Dispatchers.IO){val ip=localIp(context);val pairResult=SeamPairClient.pair(value,identity,ip,38949);launch(Dispatchers.Main){if(pairResult.isSuccess){store.save(value);pairing=value;message="Paired with ${value.deviceName}"}else message="Pairing failed: ${pairResult.exceptionOrNull()?.message?:"connection error"}"}}}.onFailure{message="Invalid SEAM Share pairing code"}}}
+ DisposableEffect(Unit){receiver.onIncomingRequest={req->scope.launch(Dispatchers.Main){incoming=req}};receiver.start();onDispose{receiver.stop();receiver.onIncomingRequest=null}}
+ LaunchedEffect(Unit){pairing=store.load()}
+ fun sendQueue(){val target=pairing?:run{message="Pair a Windows PC first";return};if(queue.isEmpty()){message="Add files to the queue first";return};sending=true;scope.launch(Dispatchers.IO){for(item in queue){val result=SeamTransferController(context).send(item.uri,target.ip,target.port,target.token,item.relativePath){p->scope.launch(Dispatchers.Main){progress=p.percent}};if(result.isFailure){launch(Dispatchers.Main){message="Transfer failed: ${result.exceptionOrNull()?.message?:"unknown error"}"};break}else launch(Dispatchers.Main){message="Sent ${item.name}"}};launch(Dispatchers.Main){sending=false;queue=emptyList();progress=100}}
+ }
+ MaterialTheme(colorScheme=darkColorScheme(primary=Color(0xFF7C5CFF),secondary=Color(0xFF00D9FF))){Box(Modifier.fillMaxSize().background(Color(0xFF080A10))){Column(Modifier.fillMaxSize().padding(24.dp),verticalArrangement=Arrangement.spacedBy(14.dp)){
+  Text("SEAM Share",color=Color.White,fontSize=22.sp);Text("Move freely. Stay connected.",color=Color(0xFF7E8393),fontSize=12.sp)
+  Card(shape=RoundedCornerShape(28.dp),colors=CardDefaults.cardColors(containerColor=Color(0xFF11141E))){Column(Modifier.fillMaxWidth().padding(22.dp),horizontalAlignment=Alignment.CenterHorizontally){Text(if(pairing==null)"Connect your PC" else pairing!!.deviceName,color=Color.White,fontSize=24.sp);Text(if(pairing==null)"Scan the QR code shown by SEAM Share on Windows." else "Paired over your local network.",color=Color(0xFF858A9B),fontSize=13.sp,modifier=Modifier.padding(top=7.dp));Button(onClick={qrLauncher.launch(ScanOptions().apply{setDesiredBarcodeFormats(ScanOptions.QR_CODE);setPrompt("Scan the SEAM Share QR code on your PC");setBeepEnabled(false);setOrientationLocked(false)})},modifier=Modifier.padding(top=16.dp)){Text("Scan pairing QR")}}}
+  if(pairing!=null)Card(colors=CardDefaults.cardColors(containerColor=Color(0xFF151824)),modifier=Modifier.fillMaxWidth()){Column(Modifier.padding(16.dp)){Text("CONNECTED",color=Color(0xFF7CE9FF),fontSize=10.sp);Text("${pairing!!.ip}:${pairing!!.port}",color=Color.White,fontSize=15.sp);Row(horizontalArrangement=Arrangement.spacedBy(8.dp)){Button(enabled=!sending,onClick={picker.launch(arrayOf("*/*"))}){Text("Add files")};Button(enabled=!sending,onClick={folderPicker.launch(null)}){Text("Add folder")};Button(enabled=!sending&&queue.isNotEmpty(),onClick={sendQueue()}){Text(if(sending)"Sending $progress%" else "Send queue")};TextButton(enabled=!sending,onClick={store.clear();pairing=null;message="Pairing removed"}){Text("Forget")}}}}
+  if(queue.isNotEmpty())Card(colors=CardDefaults.cardColors(containerColor=Color(0xFF11141E)),modifier=Modifier.fillMaxWidth()){Column(Modifier.padding(16.dp)){Text("QUEUE · ${queue.size}",color=Color(0xFF7CE9FF),fontSize=10.sp);queue.take(6).forEachIndexed{index,item->Row(Modifier.fillMaxWidth().padding(vertical=5.dp),horizontalArrangement=Arrangement.SpaceBetween){Column(Modifier.weight(1f)){Text(item.name,color=Color.White,fontSize=13.sp);Text("${item.relativePath} · ${item.size/1024} KB",color=Color(0xFF858A9B),fontSize=11.sp)}TextButton(onClick={queue=queue.filterIndexed{i,_->i!=index}}){Text("×")}}};if(queue.size>6)Text("+ ${queue.size-6} more",color=Color(0xFF858A9B),fontSize=11.sp)}}
+  Card(shape=RoundedCornerShape(28.dp),colors=CardDefaults.cardColors(containerColor=Color(0xFF11141E))){Column(Modifier.fillMaxWidth().padding(22.dp),horizontalAlignment=Alignment.CenterHorizontally){Text("Find nearby devices",color=Color.White,fontSize=20.sp);Text("Use the same Wi‑Fi network for fast local transfers.",color=Color(0xFF858A9B),fontSize=13.sp,modifier=Modifier.padding(top=7.dp));Button(onClick={scanning=true;discovery.scan{devices=it;scanning=false}},modifier=Modifier.padding(top=16.dp)){Text(if(scanning)"Scanning…" else "Scan nearby devices")}}}
+  Text("NEARBY",color=Color(0xFF666C7D),fontSize=10.sp);if(devices.isEmpty())Text("No devices found yet",color=Color(0xFF858A9B),fontSize=13.sp);devices.forEach{device->Card(colors=CardDefaults.cardColors(containerColor=Color(0xFF151824)),modifier=Modifier.fillMaxWidth()){Column(Modifier.padding(15.dp)){Text(device.name,color=Color.White);Text("${device.ip}:${device.port}",color=Color(0xFF7CE9FF),fontSize=12.sp)}}};if(message.isNotBlank())Text(message,color=Color(0xFFB8B9C8),fontSize=12.sp)
+ }
+ if(incoming!=null)AlertDialog(onDismissRequest={},title={Text("Incoming transfer")},text={Column{Text(incoming!!.name,color=Color.White);Text("${incoming!!.size/1024} KB · ${incoming!!.relativePath}",color=Color(0xFF858A9B))}},confirmButton={Button(onClick={receiver.approve(incoming!!.id,true);incoming=null}){Text("Accept")}},dismissButton={TextButton(onClick={receiver.approve(incoming!!.id,false);incoming=null}){Text("Decline")}})
+ }}
 }
