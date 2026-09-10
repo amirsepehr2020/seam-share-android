@@ -23,7 +23,6 @@ class SeamShareReceiverService : Service() {
         private const val CHANNEL_ID = "seam_share_transfer"
         private const val NOTIFICATION_ID = 38949
     }
-
     private lateinit var receiver: SeamReceiverServer
 
     override fun onCreate() {
@@ -33,6 +32,8 @@ class SeamShareReceiverService : Service() {
         receiver = SeamReceiverServer(this, identity)
         receiver.onIncomingRequest = { request -> notifyIncoming(request) }
         receiver.onIncomingText = { text -> notifyText(text) }
+        receiver.onTransferVerified = { name, checksum -> notifyVerified(name, checksum) }
+        receiver.onTransferVerificationFailed = { name, expected, actual -> notifyVerificationFailed(name, expected, actual) }
         startForeground(NOTIFICATION_ID, serviceNotification())
         receiver.start()
     }
@@ -44,12 +45,7 @@ class SeamShareReceiverService : Service() {
         }
         return START_STICKY
     }
-
-    override fun onDestroy() {
-        receiver.stop()
-        super.onDestroy()
-    }
-
+    override fun onDestroy() { receiver.stop(); super.onDestroy() }
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun serviceNotification(): Notification = NotificationCompat.Builder(this, CHANNEL_ID)
@@ -61,20 +57,13 @@ class SeamShareReceiverService : Service() {
         .build()
 
     private fun notifyIncoming(request: IncomingRequest) {
-        val accept = PendingIntent.getService(this, request.id.hashCode(), Intent(this, SeamShareReceiverService::class.java).apply {
-            action = ACTION_APPROVE
-            putExtra(EXTRA_ID, request.id)
-            putExtra(EXTRA_APPROVED, true)
-        }, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-        val decline = PendingIntent.getService(this, request.id.hashCode() + 1, Intent(this, SeamShareReceiverService::class.java).apply {
-            action = ACTION_APPROVE
-            putExtra(EXTRA_ID, request.id)
-            putExtra(EXTRA_APPROVED, false)
-        }, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val accept = PendingIntent.getService(this, request.id.hashCode(), Intent(this, SeamShareReceiverService::class.java).apply { action = ACTION_APPROVE; putExtra(EXTRA_ID, request.id); putExtra(EXTRA_APPROVED, true) }, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val decline = PendingIntent.getService(this, request.id.hashCode() + 1, Intent(this, SeamShareReceiverService::class.java).apply { action = ACTION_APPROVE; putExtra(EXTRA_ID, request.id); putExtra(EXTRA_APPROVED, false) }, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentTitle("Incoming transfer")
             .setContentText("${request.name} · ${request.size / 1024} KB")
+            .setStyle(NotificationCompat.BigTextStyle().bigText("${request.name}\nSHA-256: ${request.checksumSha256}"))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true)
             .addAction(0, "Accept", accept)
@@ -95,11 +84,30 @@ class SeamShareReceiverService : Service() {
         getSystemService(NotificationManager::class.java).notify(text.id.hashCode(), notification)
     }
 
+    private fun notifyVerified(name:String, checksum:String) {
+        NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.stat_sys_download_done)
+            .setContentTitle("Transfer verified ✓")
+            .setContentText(name)
+            .setStyle(NotificationCompat.BigTextStyle().bigText("SHA-256 verified:\n$checksum"))
+            .setAutoCancel(true)
+            .build().also { getSystemService(NotificationManager::class.java).notify((name + checksum).hashCode(), it) }
+    }
+
+    private fun notifyVerificationFailed(name:String, expected:String, actual:String) {
+        NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.stat_notify_error)
+            .setContentTitle("Transfer verification failed")
+            .setContentText(name)
+            .setStyle(NotificationCompat.BigTextStyle().bigText("The received file did not match its SHA-256 checksum.\nExpected: $expected\nActual: $actual"))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .build().also { getSystemService(NotificationManager::class.java).notify((name + "failed").hashCode(), it) }
+    }
+
     private fun createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(CHANNEL_ID, "SEAM Share transfers", NotificationManager.IMPORTANCE_HIGH).apply {
-                description = "Incoming SEAM Share transfers and text"
-            }
+            val channel = NotificationChannel(CHANNEL_ID, "SEAM Share transfers", NotificationManager.IMPORTANCE_HIGH).apply { description = "Incoming SEAM Share transfers and text" }
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
     }
