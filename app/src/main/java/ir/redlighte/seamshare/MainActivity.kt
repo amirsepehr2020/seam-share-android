@@ -1,5 +1,7 @@
 package ir.redlighte.seamshare
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.net.Uri
 import android.net.wifi.WifiManager
@@ -51,6 +53,16 @@ private fun collectTree(root: DocumentFile, prefix: String = ""): List<QueueItem
     return result
 }
 
+private fun readClipboard(context: Context): String = runCatching {
+    val manager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    manager.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
+}.getOrDefault("")
+
+private fun writeClipboard(context: Context, text: String) {
+    val manager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    manager.setPrimaryClip(ClipData.newPlainText("SEAM Share", text))
+}
+
 @Composable
 private fun SeamShareApp() {
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -59,6 +71,7 @@ private fun SeamShareApp() {
     val store = remember { SeamPairingStore(context) }
     val receiver = remember { SeamReceiverServer(context, identity) }
     val discovery = remember { SeamDiscovery() }
+    val transfer = remember { SeamTransferController(context) }
 
     var pairing by remember { mutableStateOf<SeamPairing?>(null) }
     var devices by remember { mutableStateOf<List<SeamDiscovery.Device>>(emptyList()) }
@@ -68,6 +81,8 @@ private fun SeamShareApp() {
     var sending by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf("") }
     var incoming by remember { mutableStateOf<IncomingRequest?>(null) }
+    var incomingText by remember { mutableStateOf<IncomingText?>(null) }
+    var textDraft by remember { mutableStateOf("") }
 
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         val items = uris.map { uri ->
@@ -77,10 +92,7 @@ private fun SeamShareApp() {
             val size = context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: 0L
             QueueItem(uri, name, size, name)
         }
-        if (items.isNotEmpty()) {
-            queue = queue + items
-            message = "${items.size} file(s) added to queue"
-        }
+        if (items.isNotEmpty()) { queue = queue + items; message = "${items.size} file(s) added to queue" }
     }
 
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -88,81 +100,56 @@ private fun SeamShareApp() {
             runCatching {
                 context.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 DocumentFile.fromTreeUri(context, uri)?.let(::collectTree).orEmpty()
-            }.onSuccess { items ->
-                queue = queue + items
-                message = "${items.size} file(s) from folder added"
-            }.onFailure { message = "Could not read folder" }
+            }.onSuccess { items -> queue = queue + items; message = "${items.size} file(s) from folder added" }
+                .onFailure { message = "Could not read folder" }
         }
     }
 
     val qrLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
         val contents = result.contents
-        if (contents.isNullOrBlank()) {
-            message = "QR scan cancelled"
-        } else {
-            runCatching { SeamPairing.fromJson(contents) }
-                .onSuccess { value ->
-                    scope.launch(Dispatchers.IO) {
-                        val resultPair = SeamPairClient.pair(value, identity, localIp(context), 38949)
-                        launch(Dispatchers.Main) {
-                            if (resultPair.isSuccess) {
-                                store.save(value)
-                                pairing = value
-                                message = "Paired with ${value.deviceName}"
-                            } else {
-                                message = "Pairing failed: ${resultPair.exceptionOrNull()?.message ?: "connection error"}"
-                            }
-                        }
-                    }
+        if (contents.isNullOrBlank()) message = "QR scan cancelled"
+        else runCatching { SeamPairing.fromJson(contents) }.onSuccess { value ->
+            scope.launch(Dispatchers.IO) {
+                val resultPair = SeamPairClient.pair(value, identity, localIp(context), 38949)
+                launch(Dispatchers.Main) {
+                    if (resultPair.isSuccess) { store.save(value); pairing = value; message = "Paired with ${value.deviceName}" }
+                    else message = "Pairing failed: ${resultPair.exceptionOrNull()?.message ?: "connection error"}"
                 }
-                .onFailure { message = "Invalid SEAM Share pairing code" }
-        }
+            }
+        }.onFailure { message = "Invalid SEAM Share pairing code" }
     }
 
     DisposableEffect(Unit) {
-        receiver.onIncomingRequest = { request ->
-            scope.launch(Dispatchers.Main) { incoming = request }
-        }
+        receiver.onIncomingRequest = { request -> scope.launch(Dispatchers.Main) { incoming = request } }
+        receiver.onIncomingText = { text -> scope.launch(Dispatchers.Main) { incomingText = text } }
         receiver.start()
-        onDispose {
-            receiver.stop()
-            receiver.onIncomingRequest = null
-        }
+        onDispose { receiver.stop(); receiver.onIncomingRequest = null; receiver.onIncomingText = null }
     }
 
     LaunchedEffect(Unit) { pairing = store.load() }
 
+    fun sendText(text: String, kind: String = "text") {
+        val target = pairing
+        if (target == null) { message = "Pair a Windows PC first"; return }
+        if (text.isBlank()) { message = "Write some text first"; return }
+        scope.launch(Dispatchers.IO) {
+            val result = transfer.sendText(text, target.ip, target.port, target.token, kind)
+            launch(Dispatchers.Main) { message = if (result.isSuccess) "Text sent to ${target.deviceName}" else "Text send failed: ${result.exceptionOrNull()?.message ?: "connection error"}" }
+        }
+    }
+
     fun sendQueue() {
         val target = pairing
-        if (target == null) {
-            message = "Pair a Windows PC first"
-            return
-        }
-        if (queue.isEmpty()) {
-            message = "Add files to the queue first"
-            return
-        }
+        if (target == null) { message = "Pair a Windows PC first"; return }
+        if (queue.isEmpty()) { message = "Add files to the queue first"; return }
         sending = true
         scope.launch(Dispatchers.IO) {
             for (item in queue) {
-                val result = SeamTransferController(context).send(
-                    item.uri, target.ip, target.port, target.token, item.relativePath
-                ) { p ->
-                    scope.launch(Dispatchers.Main) { progress = p.percent }
-                }
-                if (result.isFailure) {
-                    launch(Dispatchers.Main) {
-                        message = "Transfer failed: ${result.exceptionOrNull()?.message ?: "unknown error"}"
-                    }
-                    break
-                }
+                val result = transfer.send(item.uri, target.ip, target.port, target.token, item.relativePath) { p -> scope.launch(Dispatchers.Main) { progress = p.percent } }
+                if (result.isFailure) { launch(Dispatchers.Main) { message = "Transfer failed: ${result.exceptionOrNull()?.message ?: "unknown error"}" }; break }
                 launch(Dispatchers.Main) { message = "Sent ${item.name}" }
             }
-            launch(Dispatchers.Main) {
-                sending = false
-                queue = emptyList()
-                progress = 100
-            }
+            launch(Dispatchers.Main) { sending = false; queue = emptyList(); progress = 100 }
         }
     }
 
@@ -175,20 +162,14 @@ private fun SeamShareApp() {
                 Card(shape = RoundedCornerShape(28.dp), colors = CardDefaults.cardColors(containerColor = Color(0xFF11141E))) {
                     Column(Modifier.fillMaxWidth().padding(22.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(if (pairing == null) "Connect your PC" else pairing!!.deviceName, color = Color.White, fontSize = 24.sp)
-                        Text(
-                            if (pairing == null) "Scan the QR code shown by SEAM Share on Windows." else "Paired over your local network.",
-                            color = Color(0xFF858A9B), fontSize = 13.sp, modifier = Modifier.padding(top = 7.dp)
-                        )
-                        Button(
-                            onClick = { qrLauncher.launch(ScanOptions().apply { setDesiredBarcodeFormats(ScanOptions.QR_CODE); setPrompt("Scan the SEAM Share QR code on your PC"); setBeepEnabled(false); setOrientationLocked(false) }) },
-                            modifier = Modifier.padding(top = 16.dp)
-                        ) { Text("Scan pairing QR") }
+                        Text(if (pairing == null) "Scan the QR code shown by SEAM Share on Windows." else "Paired over your local network.", color = Color(0xFF858A9B), fontSize = 13.sp, modifier = Modifier.padding(top = 7.dp))
+                        Button(onClick = { qrLauncher.launch(ScanOptions().apply { setDesiredBarcodeFormats(ScanOptions.QR_CODE); setPrompt("Scan the SEAM Share QR code on your PC"); setBeepEnabled(false); setOrientationLocked(false) }) }, modifier = Modifier.padding(top = 16.dp)) { Text("Scan pairing QR") }
                     }
                 }
 
                 if (pairing != null) {
                     Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF151824)), modifier = Modifier.fillMaxWidth()) {
-                        Column(Modifier.padding(16.dp)) {
+                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("CONNECTED", color = Color(0xFF7CE9FF), fontSize = 10.sp)
                             Text("${pairing!!.ip}:${pairing!!.port}", color = Color.White, fontSize = 15.sp)
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -196,6 +177,17 @@ private fun SeamShareApp() {
                                 Button(enabled = !sending, onClick = { folderPicker.launch(null) }) { Text("Add folder") }
                                 Button(enabled = !sending && queue.isNotEmpty(), onClick = { sendQueue() }) { Text(if (sending) "Sending $progress%" else "Send queue") }
                                 Button(enabled = !sending, onClick = { store.clear(); pairing = null; queue = emptyList(); message = "Pairing removed" }) { Text("Forget") }
+                            }
+                        }
+                    }
+
+                    Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF11141E)), modifier = Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("TEXT & CLIPBOARD", color = Color(0xFF7CE9FF), fontSize = 10.sp)
+                            OutlinedTextField(value = textDraft, onValueChange = { textDraft = it }, modifier = Modifier.fillMaxWidth(), minLines = 2, maxLines = 5, placeholder = { Text("Write text or paste a link…") })
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(enabled = !sending && textDraft.isNotBlank(), onClick = { sendText(textDraft); textDraft = "" }) { Text("Send text") }
+                                OutlinedButton(enabled = !sending, onClick = { val clip = readClipboard(context); if (clip.isBlank()) message = "Clipboard is empty" else sendText(clip, "clipboard") }) { Text("Send clipboard") }
                             }
                         }
                     }
@@ -207,10 +199,7 @@ private fun SeamShareApp() {
                             Text("QUEUE · ${queue.size}", color = Color(0xFF7CE9FF), fontSize = 10.sp)
                             queue.take(6).forEachIndexed { index, item ->
                                 Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                                    Column(Modifier.weight(1f)) {
-                                        Text(item.name, color = Color.White, fontSize = 13.sp)
-                                        Text("${item.relativePath} · ${item.size / 1024} KB", color = Color(0xFF858A9B), fontSize = 11.sp)
-                                    }
+                                    Column(Modifier.weight(1f)) { Text(item.name, color = Color.White, fontSize = 13.sp); Text("${item.relativePath} · ${item.size / 1024} KB", color = Color(0xFF858A9B), fontSize = 11.sp) }
                                     Button(onClick = { queue = queue.filterIndexed { i, _ -> i != index } }) { Text("×") }
                                 }
                             }
@@ -222,9 +211,7 @@ private fun SeamShareApp() {
                     Column(Modifier.fillMaxWidth().padding(22.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                         Text("Find nearby devices", color = Color.White, fontSize = 20.sp)
                         Text("Use the same Wi‑Fi network for fast local transfers.", color = Color(0xFF858A9B), fontSize = 13.sp, modifier = Modifier.padding(top = 7.dp))
-                        Button(onClick = { scanning = true; discovery.scan { devices = it; scanning = false } }, modifier = Modifier.padding(top = 16.dp)) {
-                            Text(if (scanning) "Scanning…" else "Scan nearby devices")
-                        }
+                        Button(onClick = { scanning = true; discovery.scan { devices = it; scanning = false } }, modifier = Modifier.padding(top = 16.dp)) { Text(if (scanning) "Scanning…" else "Scan nearby devices") }
                     }
                 }
 
@@ -232,23 +219,18 @@ private fun SeamShareApp() {
                 if (devices.isEmpty()) Text("No devices found yet", color = Color(0xFF858A9B), fontSize = 13.sp)
                 devices.forEach { device ->
                     Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF151824)), modifier = Modifier.fillMaxWidth()) {
-                        Column(Modifier.padding(15.dp)) {
-                            Text(device.name, color = Color.White)
-                            Text("${device.ip}:${device.port}", color = Color(0xFF7CE9FF), fontSize = 12.sp)
-                        }
+                        Column(Modifier.padding(15.dp)) { Text(device.name, color = Color.White); Text("${device.ip}:${device.port}", color = Color(0xFF7CE9FF), fontSize = 12.sp) }
                     }
                 }
                 if (message.isNotBlank()) Text(message, color = Color(0xFFB8B9C8), fontSize = 12.sp)
             }
 
             incoming?.let { request ->
-                AlertDialog(
-                    onDismissRequest = {},
-                    title = { Text("Incoming transfer") },
-                    text = { Column { Text(request.name, color = Color.White); Text("${request.size / 1024} KB · ${request.relativePath}", color = Color(0xFF858A9B)) } },
-                    confirmButton = { Button(onClick = { receiver.approve(request.id, true); incoming = null }) { Text("Accept") } },
-                    dismissButton = { Button(onClick = { receiver.approve(request.id, false); incoming = null }) { Text("Decline") } }
-                )
+                AlertDialog(onDismissRequest = {}, title = { Text("Incoming transfer") }, text = { Column { Text(request.name, color = Color.White); Text("${request.size / 1024} KB · ${request.relativePath}", color = Color(0xFF858A9B)) } }, confirmButton = { Button(onClick = { receiver.approve(request.id, true); incoming = null }) { Text("Accept") } }, dismissButton = { Button(onClick = { receiver.approve(request.id, false); incoming = null }) { Text("Decline") } })
+            }
+
+            incomingText?.let { item ->
+                AlertDialog(onDismissRequest = { incomingText = null }, title = { Text(if (item.kind == "clipboard") "Clipboard received" else "Text received") }, text = { Text(item.text, color = Color.White) }, confirmButton = { Button(onClick = { writeClipboard(context, item.text); incomingText = null; message = "Copied to clipboard" }) { Text("Copy to clipboard") } }, dismissButton = { OutlinedButton(onClick = { incomingText = null }) { Text("Close") } })
             }
         }
     }
