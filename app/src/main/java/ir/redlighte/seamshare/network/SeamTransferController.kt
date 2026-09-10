@@ -38,4 +38,16 @@ class SeamTransferController(private val context:Context){
         }}}
         require(connection.responseCode in 200..299){"Transfer failed: ${connection.responseCode}"};connection.disconnect()
     }
+
+    fun sendText(text:String,targetIp:String,targetPort:Int,token:String,kind:String="text"):Result<Unit> = runCatching{
+        require(text.isNotBlank()){"Text is empty"}
+        val bytes=text.toByteArray(Charsets.UTF_8)
+        val connection=(URL("http://$targetIp:$targetPort/text").openConnection() as HttpURLConnection).apply{
+            requestMethod="POST";doOutput=true;connectTimeout=5000;readTimeout=10000
+            setRequestProperty("Content-Type","text/plain; charset=utf-8");setRequestProperty("Content-Length",bytes.size.toString());setRequestProperty("X-Seam-Token",token);setRequestProperty("X-Seam-Text-Kind",kind);setRequestProperty("X-Seam-Text-Id","android-text-${System.nanoTime()}")
+        }
+        connection.outputStream.use{it.write(bytes)}
+        require(connection.responseCode in 200..299){"Text send failed: ${connection.responseCode}"}
+        connection.disconnect()
+    }
 }
