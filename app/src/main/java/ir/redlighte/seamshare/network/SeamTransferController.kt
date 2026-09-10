@@ -5,6 +5,7 @@ import android.net.Uri
 import java.io.BufferedOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 
 class SeamTransferController(private val context:Context){
     data class Progress(val sent:Long,val total:Long,val percent:Int)
@@ -12,7 +13,7 @@ class SeamTransferController(private val context:Context){
         val resolver=context.contentResolver
         val total=resolver.openAssetFileDescriptor(uri,"r")?.use{it.length} ?: -1L
         val name=resolver.query(uri,arrayOf("_display_name"),null,null,null)?.use{c->if(c.moveToFirst())c.getString(0) else "shared-file"} ?: "shared-file"
-        val safeName=name.replace('\r','_').replace('\n','_')
+        val safeName=URLEncoder.encode(name.replace('\r','_').replace('\n','_'),"UTF-8")
         val connection=(URL("http://$targetIp:$targetPort/receive").openConnection() as HttpURLConnection).apply{
             requestMethod="POST";doOutput=true;connectTimeout=5000;readTimeout=60000
             setRequestProperty("Content-Type","application/octet-stream");setRequestProperty("X-Seam-Token",token);setRequestProperty("X-File-Name",safeName)
