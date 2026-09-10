@@ -1,6 +1,5 @@
 package ir.redlighte.seamshare.network
 
-import android.content.ClipData
 import android.content.Context
 import android.content.SharedPreferences
 import android.content.ContentValues
@@ -20,7 +19,6 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
 data class IncomingRequest(val id:String,val name:String,val size:Long,val relativePath:String)
-
 data class IncomingText(val id:String,val text:String,val kind:String)
 
 class SeamReceiverServer(private val context:Context, private val identity:SeamIdentity, private val port:Int=38949){
@@ -49,6 +47,7 @@ class SeamReceiverServer(private val context:Context, private val identity:SeamI
         val input=BufferedInputStream(s.getInputStream());val headerBytes=ByteArrayOutputStream();var state=0
         while(state<4){val b=input.read();if(b<0)return@runCatching;headerBytes.write(b);state=if(state==0&&b==13)1 else if(state==1&&b==10)2 else if(state==2&&b==13)3 else if(state==3&&b==10)4 else 0;if(headerBytes.size()>65536)return@runCatching}
         val lines=headerBytes.toString(Charsets.UTF_8.name()).trim().split("\r\n");val request=lines.firstOrNull().orEmpty();val headers=lines.drop(1).mapNotNull{it.split(":",limit=2).takeIf{p->p.size==2}?.let{p->p[0].trim().lowercase() to p[1].trim()}}.toMap()
+        if(request.startsWith("OPTIONS")){respond(s,204,"");return@runCatching}
         if(request.startsWith("POST /pair")){respond(s,200,"{}");return@runCatching};if(headers["x-seam-token"]!=identity.token){respond(s,401,"");return@runCatching}
         if(request.startsWith("POST /request")){val body=readBody(input,headers["content-length"]?.toLongOrNull()?:0L);val o=org.json.JSONObject(body);val req=IncomingRequest(o.getString("id"),o.getString("name"),o.getLong("size"),o.getString("relativePath"));val future=CompletableFuture<Boolean>();pending[req.id]=future;onIncomingRequest?.invoke(req);val ok=runCatching{future.get(120,java.util.concurrent.TimeUnit.SECONDS)}.getOrDefault(false);pending.remove(req.id);respond(s,if(ok)200 else 403,if(ok)"OK" else "DECLINED");return@runCatching}
         if(request.startsWith("POST /text")){val length=headers["content-length"]?.toLongOrNull()?:0L;val text=readBody(input,length);val kind=headers["x-seam-text-kind"] ?: "text";val id=headers["x-seam-text-id"] ?: "android-text-${System.nanoTime()}";onIncomingText?.invoke(IncomingText(id,text,kind));respond(s,201,"OK");return@runCatching}
@@ -58,6 +57,6 @@ class SeamReceiverServer(private val context:Context, private val identity:SeamI
         respond(s,201,"OK")
     }}}
     private fun readBody(input:BufferedInputStream,length:Long):String{val out=ByteArrayOutputStream();var remaining=length;val b=ByteArray(8192);while(remaining>0){val n=input.read(b,0,minOf(b.size.toLong(),remaining).toInt());if(n<=0)break;out.write(b,0,n);remaining-=n};return out.toString(Charsets.UTF_8.name())}
-    private fun respond(socket:Socket,code:Int,body:String){val bytes=body.toByteArray();BufferedOutputStream(socket.getOutputStream()).use{it.write("HTTP/1.1 $code OK\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n".toByteArray());it.write(bytes);it.flush()}}
+    private fun respond(socket:Socket,code:Int,body:String){val bytes=body.toByteArray();BufferedOutputStream(socket.getOutputStream()).use{it.write("HTTP/1.1 $code OK\r\nContent-Length: ${bytes.size}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: POST, OPTIONS\r\nAccess-Control-Allow-Headers: *\r\nConnection: close\r\n\r\n".toByteArray());it.write(bytes);it.flush()}}
     private fun discover(){runCatching{DatagramSocket(38947).use{socket->socket.broadcast=true;val buffer=ByteArray(1024);while(running){val packet=DatagramPacket(buffer,buffer.size);socket.receive(packet);val text=String(packet.data,0,packet.length);val p=text.split('|');if(p.size>=3&&p[0]=="SEAM_SHARE_DISCOVER_V2"){val reply="SEAM_SHARE_DISCOVER_V2|${identity.deviceName}|$port".toByteArray();socket.send(DatagramPacket(reply,reply.size,packet.address,packet.port))}}}}}
 }
