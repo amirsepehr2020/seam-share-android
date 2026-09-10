@@ -28,7 +28,7 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity(){override fun onCreate(savedInstanceState:Bundle?){super.onCreate(savedInstanceState);setContent{SeamShareApp()}}}
 private fun localIp(context:Context):String=runCatching{val wm=context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager;val ip=wm.connectionInfo.ipAddress;listOf(ip and 255,(ip shr 8) and 255,(ip shr 16) and 255,(ip shr 24) and 255).joinToString(".")}.getOrDefault("127.0.0.1")
 data class QueueItem(val uri:Uri,val name:String,val size:Long,val relativePath:String)
-private fun collectTree(context:Context,root:DocumentFile,current:String=""):List<QueueItem>{val out=mutableListOf<QueueItem>();root.listFiles().forEach{f->val rel=if(current.isBlank())f.name.orEmpty() else "$current/${f.name.orEmpty()}";if(f.isDirectory)out+=collectTree(context,f,rel) else out+=QueueItem(f.uri,f.name? :"shared-file",f.length(),rel)};return out}
+private fun collectTree(context:Context,root:DocumentFile,current:String=""):List<QueueItem>{val out=mutableListOf<QueueItem>();root.listFiles().forEach{f->val rel=if(current.isBlank())f.name.orEmpty() else "$current/${f.name.orEmpty()}";if(f.isDirectory)out+=collectTree(context,f,rel) else out+=QueueItem(f.uri,f.name ?: "shared-file",f.length(),rel)};return out}
 
 @Composable private fun SeamShareApp(){
  val context=androidx.compose.ui.platform.LocalContext.current;val scope=rememberCoroutineScope();val identity=remember{SeamIdentityStore(context).load()};val store=remember{SeamPairingStore(context)};val receiver=remember{SeamReceiverServer(context,identity)}
