@@ -9,12 +9,14 @@ import org.bouncycastle.crypto.params.X25519PrivateKeyParameters
 import org.bouncycastle.crypto.params.X25519PublicKeyParameters
 import org.bouncycastle.crypto.modes.ChaCha20Poly1305
 import org.bouncycastle.crypto.params.AEADParameters
-import org.bouncycastle.crypto.params.ParametersWithIV
 import java.security.SecureRandom
 
 /** Cross-platform E2E primitives: X25519 key agreement + HKDF-SHA256 + ChaCha20-Poly1305. */
 object SeamE2eCrypto {
     private val random = SecureRandom()
+    const val TAG_LENGTH_BYTES = 16
+    const val NONCE_PREFIX_LENGTH = 4
+    private val protocolContext = "SEAM-Share-E2E-v1".toByteArray()
 
     data class KeyPair(val privateKey: ByteArray, val publicKey: ByteArray)
 
@@ -24,15 +26,25 @@ object SeamE2eCrypto {
         return KeyPair(privateKey.copyOf(), priv.generatePublicKey().encoded)
     }
 
-    fun sharedKey(privateKey: ByteArray, peerPublicKey: ByteArray, context: ByteArray = "SEAM-Share-E2E-v1".toByteArray()): ByteArray {
+    fun sharedKey(privateKey: ByteArray, peerPublicKey: ByteArray): ByteArray {
         require(privateKey.size == 32 && peerPublicKey.size == 32)
         val agreement = X25519Agreement()
         agreement.init(X25519PrivateKeyParameters(privateKey, 0))
         val shared = ByteArray(agreement.agreementSize)
         agreement.calculateAgreement(X25519PublicKeyParameters(peerPublicKey, 0), shared, 0)
+        require(shared.any { it.toInt() != 0 }) { "Invalid peer public key" }
         val hkdf = HKDFBytesGenerator(SHA256Digest())
-        hkdf.init(HKDFParameters(shared, null, context))
+        hkdf.init(HKDFParameters(shared, null, protocolContext))
         return ByteArray(32).also { hkdf.generateBytes(it, 0, it.size) }
+    }
+
+    /** 96-bit nonce: 32-bit random transfer prefix + 64-bit big-endian chunk index. */
+    fun chunkNonce(prefix: ByteArray, index: Long): ByteArray {
+        require(prefix.size == NONCE_PREFIX_LENGTH && index >= 0)
+        return ByteArray(12).also { nonce ->
+            prefix.copyInto(nonce, 0)
+            for (i in 0 until 8) nonce[4 + i] = (index ushr (56 - i * 8)).toByte()
+        }
     }
 
     fun encrypt(key: ByteArray, nonce: ByteArray, plaintext: ByteArray, aad: ByteArray = ByteArray(0)): ByteArray {
