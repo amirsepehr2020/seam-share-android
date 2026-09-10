@@ -19,6 +19,11 @@ object SeamE2eProtocol {
         return plaintextSize + chunks * TAG_SIZE
     }
 
+    fun nonce(prefix: ByteArray,index:Long):ByteArray {
+        require(prefix.size==NONCE_PREFIX_SIZE && index>=0)
+        return ByteBuffer.allocate(NONCE_SIZE).put(prefix).putLong(index).array()
+    }
+
     fun aad(transferId: String, index: Long, plaintextLength: Int): ByteArray =
         ByteBuffer.allocate(4 + 8 + 4 + transferId.toByteArray(Charsets.UTF_8).size)
             .putInt(VERSION)
