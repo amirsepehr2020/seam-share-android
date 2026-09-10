@@ -1,5 +1,6 @@
 package ir.redlighte.seamshare.network
 
+import android.content.ClipData
 import android.content.Context
 import android.content.SharedPreferences
 import android.content.ContentValues
@@ -20,12 +21,15 @@ import java.util.concurrent.Executors
 
 data class IncomingRequest(val id:String,val name:String,val size:Long,val relativePath:String)
 
+data class IncomingText(val id:String,val text:String,val kind:String)
+
 class SeamReceiverServer(private val context:Context, private val identity:SeamIdentity, private val port:Int=38949){
     private val executor=Executors.newCachedThreadPool()
     private val prefs:SharedPreferences=context.getSharedPreferences("seam_share_settings",Context.MODE_PRIVATE)
     private val pending=ConcurrentHashMap<String,CompletableFuture<Boolean>>()
     @Volatile private var running=false
     var onIncomingRequest:((IncomingRequest)->Unit)?=null
+    var onIncomingText:((IncomingText)->Unit)?=null
     fun start(){ if(running)return; running=true; executor.execute{serve()}; executor.execute{discover()} }
     fun stop(){running=false; executor.shutdownNow()}
     fun approve(id:String,approved:Boolean){pending.remove(id)?.complete(approved)}
@@ -47,6 +51,7 @@ class SeamReceiverServer(private val context:Context, private val identity:SeamI
         val lines=headerBytes.toString(Charsets.UTF_8.name()).trim().split("\r\n");val request=lines.firstOrNull().orEmpty();val headers=lines.drop(1).mapNotNull{it.split(":",limit=2).takeIf{p->p.size==2}?.let{p->p[0].trim().lowercase() to p[1].trim()}}.toMap()
         if(request.startsWith("POST /pair")){respond(s,200,"{}");return@runCatching};if(headers["x-seam-token"]!=identity.token){respond(s,401,"");return@runCatching}
         if(request.startsWith("POST /request")){val body=readBody(input,headers["content-length"]?.toLongOrNull()?:0L);val o=org.json.JSONObject(body);val req=IncomingRequest(o.getString("id"),o.getString("name"),o.getLong("size"),o.getString("relativePath"));val future=CompletableFuture<Boolean>();pending[req.id]=future;onIncomingRequest?.invoke(req);val ok=runCatching{future.get(120,java.util.concurrent.TimeUnit.SECONDS)}.getOrDefault(false);pending.remove(req.id);respond(s,if(ok)200 else 403,if(ok)"OK" else "DECLINED");return@runCatching}
+        if(request.startsWith("POST /text")){val length=headers["content-length"]?.toLongOrNull()?:0L;val text=readBody(input,length);val kind=headers["x-seam-text-kind"] ?: "text";val id=headers["x-seam-text-id"] ?: "android-text-${System.nanoTime()}";onIncomingText?.invoke(IncomingText(id,text,kind));respond(s,201,"OK");return@runCatching}
         if(!request.startsWith("POST /receive")){respond(s,404,"");return@runCatching}
         val length=headers["content-length"]?.toLongOrNull() ?: 0L;val rawName=headers["x-file-name"]?.let{runCatching{java.net.URLDecoder.decode(it,"UTF-8")}.getOrDefault(it)} ?: "received-file";val rel=headers["x-relative-path"]?.let{runCatching{java.net.URLDecoder.decode(it,"UTF-8")}.getOrDefault(it)} ?: rawName
         createOutput(rawName,rel)?.use{out->var remaining=length;val buffer=ByteArray(256*1024);while(remaining>0){val n=input.read(buffer,0,minOf(buffer.size.toLong(),remaining).toInt());if(n<=0)break;out.write(buffer,0,n);remaining-=n}}
