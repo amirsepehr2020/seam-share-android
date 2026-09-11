@@ -8,6 +8,7 @@ import ir.redlighte.seamshare.network.SeamPairingStore
 import ir.redlighte.seamshare.network.SeamTransferController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
 /** Android Sharesheet target: send a shared file/text to the already-paired Windows device. */
@@ -93,7 +94,7 @@ class SeamShareShareActivity : Activity() {
     }
 
     override fun onDestroy() {
-        scope.coroutineContext.cancel()
+        scope.cancel()
         super.onDestroy()
     }
 }
