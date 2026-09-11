@@ -14,13 +14,14 @@ import java.security.SecureRandom
 class SeamTransferController(private val context: Context) {
     data class Progress(val sent: Long, val total: Long, val percent: Int)
     private val random = SecureRandom()
+    private companion object { const val IO_BUFFER = 1024 * 1024 }
 
     private fun sha256(uri: Uri): String {
         val digest = MessageDigest.getInstance("SHA-256")
         context.contentResolver.openInputStream(uri).use { raw ->
             requireNotNull(raw) { "Unable to open selected file" }
-            BufferedInputStream(raw).use { input ->
-                val buffer = ByteArray(256 * 1024)
+            BufferedInputStream(raw, IO_BUFFER).use { input ->
+                val buffer = ByteArray(IO_BUFFER)
                 while (true) { val n = input.read(buffer); if (n < 0) break; digest.update(buffer, 0, n) }
             }
         }
@@ -69,8 +70,8 @@ class SeamTransferController(private val context: Context) {
         }
         resolver.openInputStream(uri).use { raw ->
             requireNotNull(raw) { "Unable to open selected file" }
-            BufferedInputStream(raw).use { input ->
-                BufferedOutputStream(connection.outputStream).use { output ->
+            BufferedInputStream(raw, IO_BUFFER).use { input ->
+                BufferedOutputStream(connection.outputStream, IO_BUFFER).use { output ->
                     val plain = ByteArray(SeamE2eProtocol.PLAINTEXT_CHUNK); var index = 0L; var sent = 0L
                     if (total == 0L) {
                         val cipher = SeamE2eCrypto.encrypt(key, SeamE2eProtocol.nonce(prefix, 0L), ByteArray(0), SeamE2eProtocol.aad(id, 0L, 0))
