@@ -15,9 +15,8 @@ object SeamTransferClient {
     ): Boolean {
         val candidates = SeamTransportSelector.localCandidates(host, port)
         val selected = SeamTransportSelector.select(candidates) ?: return false
-        val target = selected.target
-        val targetHost = target.host ?: return false
-        val targetPort = target.port ?: return false
+        val targetHost = selected.host ?: return false
+        val targetPort = selected.port ?: return false
 
         val connection = (URL("http://$targetHost:$targetPort/receive-e2e").openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
