@@ -72,11 +72,16 @@ class SeamTransferController(private val context: Context) {
             BufferedInputStream(raw).use { input ->
                 BufferedOutputStream(connection.outputStream).use { output ->
                     val plain = ByteArray(SeamE2eProtocol.PLAINTEXT_CHUNK); var index = 0L; var sent = 0L
-                    while (true) {
-                        val n = input.read(plain); if (n < 0) break
-                        val cipher = SeamE2eCrypto.encrypt(key, SeamE2eProtocol.nonce(prefix, index), plain.copyOf(n), SeamE2eProtocol.aad(id, index, n))
-                        output.write(cipher); sent += n
-                        onProgress(Progress(sent, total, ((sent * 100) / total.coerceAtLeast(1)).toInt().coerceAtMost(100))); index++
+                    if (total == 0L) {
+                        val cipher = SeamE2eCrypto.encrypt(key, SeamE2eProtocol.nonce(prefix, 0L), ByteArray(0), SeamE2eProtocol.aad(id, 0L, 0))
+                        output.write(cipher)
+                    } else {
+                        while (true) {
+                            val n = input.read(plain); if (n < 0) break
+                            val cipher = SeamE2eCrypto.encrypt(key, SeamE2eProtocol.nonce(prefix, index), plain.copyOf(n), SeamE2eProtocol.aad(id, index, n))
+                            output.write(cipher); sent += n
+                            onProgress(Progress(sent, total, ((sent * 100) / total.coerceAtLeast(1)).toInt().coerceAtMost(100))); index++
+                        }
                     }
                 }
             }
