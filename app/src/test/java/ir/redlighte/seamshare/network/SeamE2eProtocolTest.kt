@@ -9,7 +9,7 @@ class SeamE2eProtocolTest {
         assertEquals(16L, SeamE2eProtocol.ciphertextSize(0))
         assertEquals(17L, SeamE2eProtocol.ciphertextSize(1))
         assertEquals(256L * 1024L + 16L, SeamE2eProtocol.ciphertextSize(256L * 1024L))
-        assertEquals(256L * 1024L + 32L, SeamE2eProtocol.ciphertextSize(256L * 1024L + 1L))
+        assertEquals(256L * 1024L + 33L, SeamE2eProtocol.ciphertextSize(256L * 1024L + 1L))
     }
 
     @Test
